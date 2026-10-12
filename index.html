@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Painel Web Rádio Live</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        :root {
+            --bg-color: #121214;
+            --panel-color: #202024;
+            --accent-color: #00b37e;
+            --danger-color: #f75a68;
+            --text-color: #e1e1e6;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+        }
+        .container {
+            width: 100%;
+            max-width: 500px;
+            background: var(--panel-color);
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+        }
+        .screen { display: none; }
+        .active { display: block; }
+        h2, h3 { text-align: center; margin-top: 0; }
+        button {
+            width: 100%;
+            padding: 12px;
+            margin: 10px 0;
+            border: none;
+            border-radius: 4px;
+            font-weight: bold;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        .btn-primary { background-color: var(--accent-color); color: #fff; }
+        .btn-danger { background-color: var(--danger-color); color: #fff; }
+        .status-badge {
+            text-align: center;
+            padding: 8px;
+            font-weight: bold;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            background: #29292e;
+        }
+        .online { color: var(--accent-color); border: 1px solid var(--accent-color); }
+        .offline { color: var(--danger-color); border: 1px solid var(--danger-color); }
+        .slot-card {
+            background: #29292e;
+            padding: 10px;
+            margin: 8px 0;
+            border-radius: 4px;
+        }
+        .controls-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 5px;
+        }
+        .slider-group {
+            display: flex;
+            flex-direction: column;
+            flex-grow: 1;
+        }
+        input[type="range"] { width: 100%; }
+        input[type="password"], input[type="file"] {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            box-sizing: border-box;
+            background: #121214;
+            color: #fff;
+            border: 1px solid #323238;
+            border-radius: 4px;
+        }
+        .counter { text-align: center; font-size: 14px; margin-top: 10px; color: #8d8d99; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <!-- TELA 1: SELEÇÃO DE PERFIL -->
+    <div id="screen-auth" class="screen active">
+        <h2>Web Rádio - Acesso</h2>
+        <button class="btn-primary" onclick="selectRole('ouvinte')">Entrar como Ouvinte</button>
+        <hr style="border-color: #323238; margin: 20px 0;">
+        <h3>Área do Locutor</h3>
+        <input type="password" id="radio-password" placeholder="Digite a senha de transmissão">
+        <button style="background: #4d4d57; color: #fff;" onclick="selectRole('locutor')">Acessar Painel</button>
+    </div>
+
+    <!-- TELA 2: PAINEL DO LOCUTOR -->
+    <div id="screen-locutor" class="screen">
+        <h2>🎙️ Painel de Locução</h2>
+        <div id="status-locutor" class="status-badge offline">DESCONECTADO</div>
+        
+        <div style="display:flex; gap:10px;">
+            <button class="btn-primary" id="btn-start" onclick="startTransmission()">INICIAR NO AR</button>
+            <button class="btn-danger" id="btn-stop" onclick="stopTransmission()" disabled>FINALIZAR</button>
+        </div>
+
+        <div class="counter">👥 Ouvintes conectados: <span id="count-locutor">0</span></div>
+
+        <!-- MÚSICAS (5 SLOTS) -->
+        <h3>🎵 Músicas (Até 5)</h3>
+        <div id="music-slots"></div>
+
+        <!-- EFEITOS (5 SLOTS) -->
+        <h3>⚡ Efeitos Sonoros (Até 5)</h3>
+        <div id="fx-slots"></div>
+    </div>
+
+    <!-- TELA 3: PAINEL DO OUVINTE -->
+    <div id="screen-ouvinte" class="screen">
+        <h2>📻 Sintonia Ouvinte</h2>
+        <div id="status-ouvinte" class="status-badge offline">RÁDIO OFFLINE</div>
+        
+        <button class="btn-primary" id="btn-listen" onclick="toggleListening()">Ouvir Transmissão</button>
+        
+        <div class="slider-group" style="margin-top:15px;">
+            <label>Volume do Som:</label>
+            <input type="range" id="listener-volume" min="0" max="1" step="0.01" value="0.8">
+        </div>
+
+        <div class="counter">👥 Ouvintes na rádio: <span id="count-ouvinte">0</span></div>
+    </div>
+</div>
+
+<script>
+    const socket = io();
+    let currentRole = '';
+    let isTransmitting = false;
+    let isListening = false;
+    
+    // Elementos de Audio (Locutor)
+    let audioCtx = null;
+    let mixedDest = null;
+    let mediaRecorder = null;
+    let micStream = null;
+    let micNode = null;
+
+    // Elementos de Audio (Ouvinte)
+    let outputCtx = null;
+    let listenerVolumeNode = null;
+    let nextStartTime = 0;
+
+    // Inicializa os Slots na interface de forma dinâmica
+    function buildSlots() {
+        const mContainer = document.getElementById('music-slots');
+        for(let i=1; i<=5; i++) {
+            mContainer.innerHTML += `
+                <div class="slot-card">
+                    <label>Slot Música ${i}</label>
+                    <input type="file" accept="audio/*" onchange="loadAudio(this, 'music', ${i})">
+                    <div class="controls-row">
+                        <button style="width:70px; padding:5px; margin:0;" onclick="playAudio('music', ${i})">▶/⏸</button>
+                        <div class="slider-group">
+                            <input type="range" min="0" max="1" step="0.01" value="0.7" oninput="setVolume('music', ${i}, this.value)">
+                        </div>
+                    </div>
+                </div>`;
+        }
+        const fContainer = document.getElementById('fx-slots');
+        for(let i=1; i<=5; i++) {
+            fContainer.innerHTML += `
+                <div class="slot-card">
+                    <label>Efeito ${i}</label>
+                    <input type="file" accept="audio/*" onchange="loadAudio(this, 'fx', ${i})">
+                    <div class="controls-row">
+                        <button style="width:100px; padding:5px; margin:0; background:#e1b12c; color:#000;" onclick="playAudio('fx', ${i})">⚡ DISPARAR</button>
+                        <div class="slider-group">
+                            <input type="range" min="0" max="1" step="0.01" value="0.8" oninput="setVolume('fx', ${i}, this.value)">
+                        </div>
+                    </div>
+                </div>`;
+        }
+    }
+    buildSlots();
+
+    // Controle de telas
+    function selectRole(role) {
+        if(role === 'locutor') {
+            const pass = document.getElementById('radio-password').value;
+            if(!pass) return alert("Digite a senha!");
+            socket.emit('startStream', pass);
+        } else {
+            currentRole = 'ouvinte';
+            switchScreen('screen-ouvinte');
+        }
+    }
+
+    socket.on('streamStatus', (res) => {
+        if(res.success) {
+            currentRole = 'locutor';
+            switchScreen('screen-locutor');
+            document.getElementById('status-locutor').innerText = "PRONTO PARA TRANSMITIR";
+            document.getElementById('status-locutor').className = "status-badge online";
+        } else {
+            alert(res.message);
+        }
+    });
+
+    function switchScreen(id) {
+        document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+        document.getElementById(id).classList.add('active');
+    }
+
+    // Gerenciamento de Áudio do Locutor (Mapeamento)
+    const audioData = { music: {}, fx: {} };
+
+    function loadAudio(input, type, slot) {
+        const file = input.files[0];
+        if(!file) return;
+        audioData[type][slot] = { file: file, audioNode: null, gainNode: null, volume: 0.7, isPlaying: false };
+    }
+
+    function setupAudioContext() {
+        if(!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            mixedDest = audioCtx.createMediaStreamDestination();
+        }
+    }
+
+    function setVolume(type, slot, val) {
+        if(audioData[type][slot]) {
+            audioData[type][slot].volume = parseFloat(val);
+            if(audioData[type][slot].gainNode) {
+                audioData[type][slot].gainNode.gain.value = parseFloat(val);
+            }
+        }
+    }
+
+    async function playAudio(type, slot) {
+        setupAudioContext();
+        const data = audioData[type][slot];
+        if(!data) return alert("Carregue um arquivo neste slot primeiro!");
+
+        if(type === 'music' && data.isPlaying) {
+            if(data.audioNode) { data.audioNode.stop(); data.isPlaying = false; }
+            return;
+        }
+
+        const arrayBuffer = await data.file.arrayBuffer();
+        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+        
+        const source = audioCtx.createBufferSource();
+        source.buffer = audioBuffer;
+        
+        const gainNode = audioCtx.createGain();
+        gainNode.gain.value = data.volume;
+        
+        source.connect(gainNode);
+        gainNode.connect(mixedDest); 
+        gainNode.connect(audioCtx.destination); 
+        
+        data.audioNode = source;
+        data.gainNode = gainNode;
+        
+        if(type === 'music') data.isPlaying = true;
+        source.start(0);
+    }
+
+    async function startTransmission() {
+        setupAudioContext();
+        try {
+            micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+            micNode = audioCtx.createMediaStreamSource(micStream);
+            micNode.connect(mixedDest);
+
+            mediaRecorder = new MediaRecorder(mixedDest.stream, { mimeType: 'audio/webm;codecs=opus' });
+            
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0 && isTransmitting) {
+                    socket.emit('audioChunks', event.data);
+                }
+            };
+
+            isTransmitting = true;
+            mediaRecorder.start(200); 
+
+            document.getElementById('btn-start').disabled = true;
+            document.getElementById('btn-stop').disabled = false;
+            document.getElementById('status-locutor').innerText = "🔴 NO AR TRANSMITINDO";
+            document.getElementById('status-locutor').style.color = "#f75a68";
+        } catch (err) {
+            alert("Erro ao acessar microfone: " + err);
+        }
+    }
+
+    function stopTransmission() {
+        isTransmitting = false;
+        if(mediaRecorder) mediaRecorder.stop();
+        if(micStream) micStream.getTracks().forEach(track => track.stop());
+        socket.emit('stopStream');
+        
+        document.getElementById('btn-start').disabled = false;
+        document.getElementById('btn-stop').disabled = true;
+        document.getElementById('status-locutor').innerText = "TRANSMISSÃO FINALIZADA";
+        document.getElementById('status-locutor').className = "status-badge offline";
+    }
+
+    function toggleListening() {
+        if(!outputCtx) {
+            outputCtx = new (window.AudioContext || window.webkitAudioContext)();
+            listenerVolumeNode = outputCtx.createGain();
+            listenerVolumeNode.connect(outputCtx.destination);
+            nextStartTime = outputCtx.currentTime;
+            
+            document.getElementById('listener-volume').addEventListener('input', (e) => {
+                listenerVolumeNode.gain.value = e.target.value;
+            });
+        }
+        isListening = !isListening;
+        document.getElementById('btn-listen').innerText = isListening ? "Mudar para Mudo" : "Ouvir Transmissão";
+    }
+
+    socket.on('audioStream', async (arrayBuffer) => {
+        if (!isListening || !outputCtx) return;
+        try {
+            const audioBuffer = await outputCtx.decodeAudioData(arrayBuffer);
+            const source = outputCtx.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(listenerVolumeNode);
+            
+            if (nextStartTime < outputCtx.currentTime) {
+                nextStartTime = outputCtx.currentTime;
+            }
+            source.start(nextStartTime);
+            nextStartTime += audioBuffer.duration;
+        } catch (e) {
+        }
+    });
+
+    socket.on('radioStatus', (status) => {
+        const badge = document.getElementById('status-ouvinte');
+        if(status.online) {
+            badge.innerText = "🟢 RÁDIO NO AR LIVE";
+            badge.className = "status-badge online";
+        } else {
+            badge.innerText = "RÁDIO OFFLINE";
+            badge.className = "status-badge offline";
+            isListening = false;
+            if(document.getElementById('btn-listen')) document.getElementById('btn-listen').innerText = "Ouvir Transmissão";
+        }
+    });
+
+    socket.on('listenerCount', (count) => {
+        document.getElementById('count-locutor').innerText = count;
+        document.getElementById('count-ouvinte').innerText = count;
+    });
+</script>
+</body>
+</html>
