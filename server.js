@@ -12,57 +12,57 @@ const io = new Server(server, {
     }
 });
 
-// Serve os arquivos da pasta pública (onde vai ficar o index.html)
+// Configuração inteligente: tenta servir da raiz e também da pasta 'public'
+app.use(express.static(path.join(__dirname, '.')));
 app.use(express.static(path.join(__dirname, 'public')));
 
-let liveStreamer = null;
-let activeListeners = 0;
+// Rota padrão para garantir a entrega do arquivo correto
+app.get('/', (req, res) => {
+    // Tenta enviar da pasta public se existir, senão envia da raiz
+    res.sendFile(path.join(__dirname, 'public', 'index.html'), (err) => {
+        if (err) {
+            res.sendFile(path.join(__dirname, 'index.html'));
+        }
+    });
+});
+
+let locutorSocketId = null;
+let ouvintesContador = 0;
 
 io.on('connection', (socket) => {
-    // Incrementa contador quando alguém conecta
-    activeListeners++;
-    io.emit('listenerCount', activeListeners);
+    ouvintesContador++;
+    io.emit('contador-atualizado', ouvintesContador);
 
-    // Identifica se é o locutor iniciando a transmissão
-    socket.on('startStream', (password) => {
-        if (password === '1234') { // Altere aqui a sua senha se desejar
-            liveStreamer = socket.id;
-            socket.emit('streamStatus', { success: true, message: "Transmissão iniciada com sucesso!" });
-            io.emit('radioStatus', { online: true });
-        } else {
-            socket.emit('streamStatus', { success: false, message: "Senha incorreta!" });
+    socket.on('registrar-locutor', () => {
+        locutorSocketId = socket.id;
+        io.emit('status-radio', { noAr: true });
+    });
+
+    socket.on('stream-audio', (chunk) => {
+        if (socket.id === locutorSocketId) {
+            socket.broadcast.emit('audio-recebido', chunk);
         }
     });
 
-    // Recebe os dados de áudio do locutor e repassa para todos os ouvintes
-    socket.on('audioChunks', (data) => {
-        if (socket.id === liveStreamer) {
-            socket.broadcast.emit('audioStream', data);
+    socket.on('parar-stream', () => {
+        if (socket.id === locutorSocketId) {
+            locutorSocketId = null;
+            io.emit('status-radio', { noAr: false });
         }
     });
 
-    // Quando o locutor finaliza a transmissão por vontade própria
-    socket.on('stopStream', () => {
-        if (socket.id === liveStreamer) {
-            liveStreamer = null;
-            io.emit('radioStatus', { online: false });
-        }
-    });
-
-    // Decrementa contador ao desconectar
     socket.on('disconnect', () => {
-        activeListeners = Math.max(0, activeListeners - 1);
-        io.emit('listenerCount', activeListeners);
+        ouvintesContador = Math.max(0, ouvintesContador - 1);
+        io.emit('contador-atualizado', ouvintesContador);
         
-        // Se o locutor fechar a aba ou cair a internet, encerra a transmissão
-        if (socket.id === liveStreamer) {
-            liveStreamer = null;
-            io.emit('radioStatus', { online: false });
+        if (socket.id === locutorSocketId) {
+            locutorSocketId = null;
+            io.emit('status-radio', { noAr: false });
         }
     });
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Servidor de rádio rodando na porta ${PORT}`);
+    console.log(`Servidor da rádio rodando na porta ${PORT}`);
 });
